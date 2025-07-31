@@ -4,12 +4,13 @@ import logging
 import sys
 from importlib.resources import files
 from typing import Callable
+from datetime import datetime, timedelta
 
 import msgpack
 import msgpack_numpy
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt, Signal, Slot
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt, Signal, Slot, QTimer
 from PySide6.QtGui import QAction, QIcon, QMouseEvent, QShortcut
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
@@ -26,6 +27,8 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QVBoxLayout,
     QWidget,
+    QPushButton,
+    QFrame,
 )
 
 from wave_monitor.__about__ import __version__
@@ -128,7 +131,18 @@ class DataSource(QLocalServer):
         elif msg["_type"] == "add_note":
             self.add_note.emit(msg["name"], msg["note"])
         elif msg["_type"] == "are_you_there":
-            self.client_connection.write(b"yes")
+            self.client_connection.write(b"yes")        
+        elif msg["_type"] == "get_status":
+            # Return current status from the monitor window
+            # Find the MonitorWindow instance
+            window = self.parent()
+            if hasattr(window, 'monitor_window'):
+                status = window.monitor_window.run_status.encode('utf-8')
+            else:
+                # Try to find the MonitorWindow through other means
+                # The parent should be the QMainWindow, and we need to find the MonitorWindow instance
+                status = b"run"  # Default status if monitor window not found
+            self.client_connection.write(status)
         else:
             raise ValueError(f"Unknown message type: {msg['_type']}")
 
@@ -147,6 +161,11 @@ class MonitorWindow:
     """Keep some widgets and plot waveforms with them."""
 
     logger = logger.getChild("MonitorWindow")
+    
+    # Status constants
+    STATUS_STOP = "stop"
+    STATUS_RUN = "run" 
+    STATUS_TIMED = "timed"
 
     def __init__(self, wfm_separation: float = 2):
         MonitorWindow.setup_app_style(QApplication.instance())
@@ -176,6 +195,57 @@ class MonitorWindow:
         # viewport gets the mouseReleaseEvent, See https://blog.csdn.net/theoryll/article/details/110918779
         plot_widget.viewport().installEventFilter(_filter)
         self._right_click_filter = _filter
+
+        # Create control panel
+        control_dock = QDockWidget("Control", window)
+        control_dock.setFloating(False)
+        window.addDockWidget(Qt.TopDockWidgetArea, control_dock)
+        
+        # Create control widgets
+        control_widget = QWidget()
+        control_layout = QHBoxLayout(control_widget)
+        
+        # Status indicator
+        self.status_indicator = QFrame()
+        self.status_indicator.setFixedSize(20, 20)
+        self.status_indicator.setFrameShape(QFrame.Box)
+        self.status_indicator.setStyleSheet("background-color: green; border: 1px solid black;")
+        control_layout.addWidget(self.status_indicator)
+        
+        # Status label
+        self.status_label = QLabel("Status: Run")
+        control_layout.addWidget(self.status_label)
+        
+        # Remaining time label (for timed mode)
+        self.time_label = QLabel("")
+        control_layout.addWidget(self.time_label)
+        
+        # Spacer
+        control_layout.addStretch(1)
+        
+        # Control buttons
+        self.stop_button = QPushButton("Stop")
+        self.stop_button.clicked.connect(self.set_stop_mode)
+        control_layout.addWidget(self.stop_button)
+        
+        self.timed_button = QPushButton("Run for 5 min")
+        self.timed_button.clicked.connect(self.set_timed_mode)
+        control_layout.addWidget(self.timed_button)
+        
+        self.run_button = QPushButton("Run forever")
+        self.run_button.clicked.connect(self.set_run_mode)
+        control_layout.addWidget(self.run_button)
+        
+        control_dock.setWidget(control_widget)
+        
+        # Set initial status
+        self.run_status = self.STATUS_STOP  # Start in run mode
+        self.timer_end_time = None
+        
+        # Create timer for updating remaining time and checking timed mode
+        self.status_timer = QTimer()
+        self.status_timer.timeout.connect(self.update_status)
+        self.status_timer.start(1000)  # Update every second
 
         dock_widget = QDockWidget(f"wfms⪅{N_VISIBLE_WFMS}", window)
         dock_widget.setFloating(False)
@@ -226,6 +296,9 @@ class MonitorWindow:
         server.autoscale.connect(self.autoscale)
         server.add_note.connect(self.add_note)
 
+        # Store reference to MonitorWindow in the window for status queries
+        window.monitor_window = self
+
         window.show()
         self.logger.info("Ready. Right-click to show menu.")
         self.wfms: dict[str, "Waveform"] = {}
@@ -236,8 +309,16 @@ class MonitorWindow:
         self.list_widget = list_widget
         self.server = server
         self.wfm_separation = wfm_separation
+        
+        # Initialize status display
+        self.update_status_display()
 
     def add_wfm(self, name: str, t: np.ndarray, ys: list[np.ndarray]):
+        # Check run status
+        if self.run_status == self.STATUS_STOP:
+            self.logger.info(f"Not adding waveform {name} because monitor is stopped")
+            return
+            
         if name in self.wfms:
             wfm = self.wfms[name]
             wfm.update_wfm(t, ys)
@@ -401,6 +482,55 @@ class MonitorWindow:
         q_wave = np.sin(2 * np.pi * f * t)
         z_wave = np.random.rand(t.size)
         self.add_wfm("test_wfm_random", t, [i_wave, q_wave, z_wave])
+
+    def set_stop_mode(self):
+        """Set monitor to stop mode."""
+        self.run_status = self.STATUS_STOP
+        self.timer_end_time = None
+        self.update_status_display()
+        self.logger.info("Monitor set to STOP mode")
+    
+    def set_run_mode(self):
+        """Set monitor to run mode."""
+        self.run_status = self.STATUS_RUN
+        self.timer_end_time = None
+        self.update_status_display()
+        self.logger.info("Monitor set to RUN mode")
+    
+    def set_timed_mode(self):
+        """Set monitor to timed mode (5 minutes)."""
+        self.run_status = self.STATUS_TIMED
+        self.timer_end_time = datetime.now() + timedelta(minutes=5)
+        self.update_status_display()
+        self.logger.info("Monitor set to TIMED mode (5 minutes)")
+    
+    def update_status_display(self):
+        """Update the status indicator and label."""
+        if self.run_status == self.STATUS_STOP:
+            self.status_indicator.setStyleSheet("background-color: red; border: 1px solid black;")
+            self.status_label.setText("Status: Stop")
+            self.time_label.setText("")
+        elif self.run_status == self.STATUS_RUN:
+            self.status_indicator.setStyleSheet("background-color: green; border: 1px solid black;")
+            self.status_label.setText("Status: Run")
+            self.time_label.setText("")
+        elif self.run_status == self.STATUS_TIMED:
+            self.status_indicator.setStyleSheet("background-color: orange; border: 1px solid black;")
+            self.status_label.setText("Status: Timed")
+            # Update remaining time will be handled in update_status method
+    
+    def update_status(self):
+        """Update status, check for timed mode expiration."""
+        if self.run_status == self.STATUS_TIMED and self.timer_end_time:
+            remaining = self.timer_end_time - datetime.now()
+            if remaining.total_seconds() <= 0:
+                # Time expired, switch to stop mode
+                self.set_stop_mode()
+            else:
+                # Update remaining time display
+                minutes = int(remaining.total_seconds() // 60)
+                seconds = int(remaining.total_seconds() % 60)
+                self.time_label.setText(f"Remaining: {minutes:02d}:{seconds:02d}")
 
 
 class Waveform:

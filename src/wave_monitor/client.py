@@ -89,6 +89,16 @@ class WaveMonitor:
 
         self.write(dict(_type="add_note", name=name, note=note))
 
+    def get_status(self) -> str:
+        """Get the current run status from the monitor.
+        returns:
+            str: "run" "timed" or "stop" indicating the current status. "timed" means the monitor is running with a timer, and will be stopped at the end of timer.
+        """
+        reply = self.query(dict(_type="get_status"))
+        if reply:
+            return reply.decode('utf-8')
+        return "run"  # Default status if no response
+
     def write(self, msg: dict) -> None:
         if self.sock.state() != QLocalSocket.ConnectedState:
             if not self.refresh_connect():

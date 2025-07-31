@@ -1,3 +1,31 @@
+# 如何使用
+## 方案1
+使用
+src\wave_monitor\client.py
+src\wave_monitor\windows.py
+替换原版wave_monitor即可
+
+## 方案2
+在项目根目录（WaveMonitor2）下运行：
+pip install -e .
+
+# runner使用例子
+
+        if enable_monitor:
+            try:
+                monitor_status = monitor.get_status() #"run" or "stop" or "timed"
+            except Exception:
+                monitor_status = "run"
+            if monitor_status != "stop":
+                for i, args in enumerate(monitor_collect):
+                    try:
+                        monitor.add_wfm(*args)
+                    except Exception:
+                        # print(f'something wrong with {args[0]}')
+                        continue
+
+
+# 以下为原始信息
 # Wave Monitor
 
 ![snapshot](assets/snapshot.png)
