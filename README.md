@@ -48,6 +48,6 @@ monitor.remove_wfm("wave_10")
 
 # Thanks
 
-This project is derived from [WaveViewer](https://github.com/kahojyun/wave-viewer).
+This project is derived from [WaveViewer](https://github.com/kahojyun/wave-viewer) and a fork from [WaveMonitor](https://github.com/Qiujv/WaveMonitor).
 
 The icon is downloaded from https://www.freepik.com/icons/oscilloscope and made by piksart.
